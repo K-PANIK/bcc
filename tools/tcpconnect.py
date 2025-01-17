@@ -89,7 +89,15 @@ bpf_text = """
 #include <bcc/proto.h>
 
 BPF_HASH(currsock, u32, struct sock *);
+"""
 
+if not args.ipv4 and not args.ipv6:
+    args.ipv4=1
+    args.ipv6=1
+
+if args.ipv4:
+    bpf_text=bpf_text+\
+"""
 // separate data structs for ipv4 and ipv6
 struct ipv4_data_t {
     u64 ts_us;
@@ -103,7 +111,11 @@ struct ipv4_data_t {
     char task[TASK_COMM_LEN];
 };
 BPF_PERF_OUTPUT(ipv4_events);
+"""
 
+if args.ipv6:
+    bpf_text=bpf_text+\
+"""
 struct ipv6_data_t {
     u64 ts_us;
     u32 pid;
@@ -116,7 +128,11 @@ struct ipv6_data_t {
     char task[TASK_COMM_LEN];
 };
 BPF_PERF_OUTPUT(ipv6_events);
+"""
 
+if args.ipv4:
+    bpf_text=bpf_text+\
+"""
 // separate flow keys per address family
 struct ipv4_flow_key_t {
     u32 saddr;
@@ -124,14 +140,21 @@ struct ipv4_flow_key_t {
     u16 dport;
 };
 BPF_HASH(ipv4_count, struct ipv4_flow_key_t);
+"""
 
+if args.ipv6:
+    bpf_text=bpf_text+\
+"""
 struct ipv6_flow_key_t {
     unsigned __int128 saddr;
     unsigned __int128 daddr;
     u16 dport;
 };
 BPF_HASH(ipv6_count, struct ipv6_flow_key_t);
+"""
 
+bpf_text=bpf_text+\
+"""
 int trace_connect_entry(struct pt_regs *ctx, struct sock *sk)
 {
     if (container_should_be_filtered()) {
@@ -180,74 +203,110 @@ static int trace_connect_return(struct pt_regs *ctx, short ipver)
     FILTER_PORT
 
     FILTER_FAMILY
+"""
 
+if args.ipv4 and not args.ipv6:
+    bpf_text=bpf_text+\
+"""
     if (ipver == 4) {
         IPV4_CODE
-    } else /* 6 */ {
+    } 
+"""
+elif not args.ipv4 and args.ipv6:
+    bpf_text=bpf_text+\
+"""    
+    if (ipver == 6) {
         IPV6_CODE
     }
+"""
+else:
+    bpf_text=bpf_text+\
+"""   
+    if (ipver == 4) 
+    {
+        IPV4_CODE
+    }
+    else
+    {
+        IPV6_CODE
+    }
+"""
 
+bpf_text=bpf_text+\
+"""
     currsock.delete(&tid);
 
     return 0;
 }
+"""
 
+if args.ipv4:
+    bpf_text=bpf_text+\
+"""
 int trace_connect_v4_return(struct pt_regs *ctx)
 {
     return trace_connect_return(ctx, 4);
 }
-
+"""
+if args.ipv6:
+    bpf_text=bpf_text+\
+"""
 int trace_connect_v6_return(struct pt_regs *ctx)
 {
     return trace_connect_return(ctx, 6);
 }
 """
 
-struct_init = {'ipv4':
-        {'count':
-               """
-               struct ipv4_flow_key_t flow_key = {};
-               flow_key.saddr = skp->__sk_common.skc_rcv_saddr;
-               flow_key.daddr = skp->__sk_common.skc_daddr;
-               flow_key.dport = ntohs(dport);
-               ipv4_count.increment(flow_key);""",
-          'trace':
-               """
-               struct ipv4_data_t data4 = {.pid = pid, .ip = ipver};
-               data4.uid = bpf_get_current_uid_gid();
-               data4.ts_us = bpf_ktime_get_ns() / 1000;
-               data4.saddr = skp->__sk_common.skc_rcv_saddr;
-               data4.daddr = skp->__sk_common.skc_daddr;
-               data4.lport = lport;
-               data4.dport = ntohs(dport);
-               bpf_get_current_comm(&data4.task, sizeof(data4.task));
-               ipv4_events.perf_submit(ctx, &data4, sizeof(data4));"""
-               },
-        'ipv6':
-        {'count':
-               """
-               struct ipv6_flow_key_t flow_key = {};
-               bpf_probe_read_kernel(&flow_key.saddr, sizeof(flow_key.saddr),
-                   skp->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
-               bpf_probe_read_kernel(&flow_key.daddr, sizeof(flow_key.daddr),
-                   skp->__sk_common.skc_v6_daddr.in6_u.u6_addr32);
-               flow_key.dport = ntohs(dport);
-               ipv6_count.increment(flow_key);""",
-          'trace':
-               """
-               struct ipv6_data_t data6 = {.pid = pid, .ip = ipver};
-               data6.uid = bpf_get_current_uid_gid();
-               data6.ts_us = bpf_ktime_get_ns() / 1000;
-               bpf_probe_read_kernel(&data6.saddr, sizeof(data6.saddr),
-                   skp->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
-               bpf_probe_read_kernel(&data6.daddr, sizeof(data6.daddr),
-                   skp->__sk_common.skc_v6_daddr.in6_u.u6_addr32);
-               data6.lport = lport;
-               data6.dport = ntohs(dport);
-               bpf_get_current_comm(&data6.task, sizeof(data6.task));
-               ipv6_events.perf_submit(ctx, &data6, sizeof(data6));"""
-               }
-               }
+struct_init = {}
+if args.ipv4:
+    struct_init = struct_init | { 'ipv4':
+                    {'count':
+                        """
+        struct ipv4_flow_key_t flow_key = {};
+        flow_key.saddr = skp->__sk_common.skc_rcv_saddr;
+        flow_key.daddr = skp->__sk_common.skc_daddr;
+        flow_key.dport = ntohs(dport);
+        ipv4_count.increment(flow_key);""",
+                    'trace':
+                        """
+        struct ipv4_data_t data4 = {.pid = pid, .ip = ipver};
+        data4.uid = bpf_get_current_uid_gid();
+        data4.ts_us = bpf_ktime_get_ns() / 1000;
+        data4.saddr = skp->__sk_common.skc_rcv_saddr;
+        data4.daddr = skp->__sk_common.skc_daddr;
+        data4.lport = lport;
+        data4.dport = ntohs(dport);
+        bpf_get_current_comm(&data4.task, sizeof(data4.task));
+        ipv4_events.perf_submit(ctx, &data4, sizeof(data4));"""
+                    }
+                }
+
+if args.ipv6:
+    struct_init = struct_init | { 'ipv6':
+                    {'count':
+"""
+        struct ipv6_flow_key_t flow_key = {};
+        bpf_probe_read_kernel(&flow_key.saddr, sizeof(flow_key.saddr),
+            skp->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
+        bpf_probe_read_kernel(&flow_key.daddr, sizeof(flow_key.daddr),
+            skp->__sk_common.skc_v6_daddr.in6_u.u6_addr32);
+        flow_key.dport = ntohs(dport);
+        ipv6_count.increment(flow_key);""",
+                    'trace':
+"""
+        struct ipv6_data_t data6 = {.pid = pid, .ip = ipver};
+        data6.uid = bpf_get_current_uid_gid();
+        data6.ts_us = bpf_ktime_get_ns() / 1000;
+        bpf_probe_read_kernel(&data6.saddr, sizeof(data6.saddr),
+            skp->__sk_common.skc_v6_rcv_saddr.in6_u.u6_addr32);
+        bpf_probe_read_kernel(&data6.daddr, sizeof(data6.daddr),
+            skp->__sk_common.skc_v6_daddr.in6_u.u6_addr32);
+        data6.lport = lport;
+        data6.dport = ntohs(dport);
+        bpf_get_current_comm(&data6.task, sizeof(data6.task));
+        ipv6_events.perf_submit(ctx, &data6, sizeof(data6));"""
+                        }
+                    }
 
 # This defines an additional BPF program that instruments udp_recvmsg system
 # call to locate DNS response packets on UDP port 53. When these packets are
@@ -321,7 +380,9 @@ delete_and_return:
     tbl_udp_msg_hdr.delete(&pid_tgid);
     return 0;
 }
-
+"""
+if args.ipv6:
+    dns_bpf_text = dns_bpf_text+"""
 #include <uapi/linux/udp.h>
 
 int trace_udpv6_recvmsg(struct pt_regs *ctx)
@@ -355,11 +416,15 @@ if args.count and args.dns:
 
 # code substitutions
 if args.count:
-    bpf_text = bpf_text.replace("IPV4_CODE", struct_init['ipv4']['count'])
-    bpf_text = bpf_text.replace("IPV6_CODE", struct_init['ipv6']['count'])
+    if args.ipv4:
+        bpf_text = bpf_text.replace("IPV4_CODE", struct_init['ipv4']['count'])
+    if args.ipv6:
+        bpf_text = bpf_text.replace("IPV6_CODE", struct_init['ipv6']['count'])
 else:
-    bpf_text = bpf_text.replace("IPV4_CODE", struct_init['ipv4']['trace'])
-    bpf_text = bpf_text.replace("IPV6_CODE", struct_init['ipv6']['trace'])
+    if args.ipv4:
+        bpf_text = bpf_text.replace("IPV4_CODE", struct_init['ipv4']['trace'])
+    if args.ipv6:
+        bpf_text = bpf_text.replace("IPV6_CODE", struct_init['ipv6']['trace'])
 
 if args.pid:
     bpf_text = bpf_text.replace('FILTER_PID',
@@ -369,10 +434,10 @@ if args.port:
     dports_if = ' && '.join(['dport != %d' % ntohs(dport) for dport in dports])
     bpf_text = bpf_text.replace('FILTER_PORT',
         'if (%s) { currsock.delete(&tid); return 0; }' % dports_if)
-if args.ipv4:
+if args.ipv4 and not args.ipv6:
     bpf_text = bpf_text.replace('FILTER_FAMILY',
         'if (ipver != 4) { return 0; }')
-elif args.ipv6:
+if not args.ipv4 and args.ipv6:
     bpf_text = bpf_text.replace('FILTER_FAMILY',
         'if (ipver != 6) { return 0; }')
 if args.uid:
@@ -393,7 +458,7 @@ if args.dns:
     bpf_text += dns_bpf_text
 
 if debug or args.ebpf:
-    print(bpf_text)
+    print("BPF source program:\n"+bpf_text)
     if args.ebpf:
         exit()
 
@@ -528,10 +593,13 @@ if args.dns:
 
 # initialize BPF
 b = BPF(text=bpf_text)
-b.attach_kprobe(event="tcp_v4_connect", fn_name="trace_connect_entry")
-b.attach_kprobe(event="tcp_v6_connect", fn_name="trace_connect_entry")
-b.attach_kretprobe(event="tcp_v4_connect", fn_name="trace_connect_v4_return")
-b.attach_kretprobe(event="tcp_v6_connect", fn_name="trace_connect_v6_return")
+if args.ipv4:
+    b.attach_kprobe(event="tcp_v4_connect", fn_name="trace_connect_entry")
+    b.attach_kretprobe(event="tcp_v4_connect", fn_name="trace_connect_v4_return")
+if args.ipv6:
+    b.attach_kprobe(event="tcp_v6_connect", fn_name="trace_connect_entry")
+    b.attach_kretprobe(event="tcp_v6_connect", fn_name="trace_connect_v6_return")
+
 if args.dns:
     b.attach_kprobe(event="udp_recvmsg", fn_name="trace_udp_recvmsg")
     b.attach_kretprobe(event="udp_recvmsg", fn_name="trace_udp_ret_recvmsg")
@@ -548,8 +616,10 @@ if args.count:
     # header
     print("\n%-25s %-25s %-20s %-10s" % (
         "LADDR", "RADDR", "RPORT", "CONNECTS"))
-    depict_cnt(b["ipv4_count"])
-    depict_cnt(b["ipv6_count"], l3prot='ipv6')
+    if args.ipv4:
+        depict_cnt(b["ipv4_count"])
+    if args.ipv6:
+        depict_cnt(b["ipv6_count"], l3prot='ipv6')
 # read events
 else:
     # header
@@ -571,8 +641,10 @@ else:
     start_ts = 0
 
     # read events
-    b["ipv4_events"].open_perf_buffer(print_ipv4_event)
-    b["ipv6_events"].open_perf_buffer(print_ipv6_event)
+    if args.ipv4:
+        b["ipv4_events"].open_perf_buffer(print_ipv4_event)
+    if args.ipv6:
+        b["ipv6_events"].open_perf_buffer(print_ipv6_event)
     if args.dns:
         b["dns_events"].open_perf_buffer(save_dns)
     while True:
